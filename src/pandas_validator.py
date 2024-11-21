@@ -2,15 +2,13 @@ import re
 import pandas as pd
 import numpy as np
 from typing import Dict, List, Set, Tuple, Optional
-import logging
-
 
 
 
 class PandasQueryValidator:
     """Validates pandas query operations and provides suggestions for corrections."""
 
-    def __init__(self, df: pd.DataFrame, logger: logging.Logger):
+    def __init__(self, df: pd.DataFrame):
         """Initialize validator with DataFrame schema information."""
         self.dtypes = df.dtypes.to_dict()
         self.columns = set(df.columns)
@@ -54,8 +52,7 @@ class PandasQueryValidator:
             'head': set(),
             'tail': set()
         }
-        self.logger = logger
-        self.logger.info("PandasQueryValidator initialized successfully")
+
 
     def _extract_column_references(self, code: str) -> List[str]:
         """Extract column references from the code."""
@@ -64,7 +61,6 @@ class PandasQueryValidator:
         matches = re.findall(pattern, code)
         # Flatten and filter matches
         columns = {match[0] or match[1] for match in matches}
-        self.logger.debug(f"Extracted columns: {columns}")
         return list(columns)
 
     def _extract_operations(self, code: str) -> List[str]:
@@ -72,7 +68,6 @@ class PandasQueryValidator:
         # Match method calls on df or column references
         pattern = r'\.(\w+)\('
         operations = re.findall(pattern, code)
-        self.logger.debug(f"Extracted operations: {operations}")
         return operations
 
     def _check_column_existence(self, code: str) -> List[str]:
@@ -84,7 +79,6 @@ class PandasQueryValidator:
             if col not in self.columns:
                 error_msg = f"Column '{col}' does not exist in DataFrame"
                 errors.append(error_msg)
-                self.logger.warning(error_msg)
 
         return errors
 
@@ -112,7 +106,6 @@ class PandasQueryValidator:
                 if op not in valid_ops and op not in self.valid_commands:
                     error_msg = f"Operation '{op}' may not be compatible with column '{col}' of type {dtype}"
                     errors.append(error_msg)
-                    self.logger.warning(error_msg)
 
         return errors
 
@@ -125,7 +118,6 @@ class PandasQueryValidator:
             if 'fillna' not in code and 'dropna' not in code:
                 error_msg = "String or datetime operations detected without null handling"
                 errors.append(error_msg)
-                self.logger.warning(error_msg)
 
         return errors
 
@@ -140,13 +132,11 @@ class PandasQueryValidator:
                 if 'groupby' not in code and not any(c in code for c in ['sum()', 'mean()', 'count()']):
                     error_msg = f"Aggregation '{op}' used without groupby"
                     errors.append(error_msg)
-                    self.logger.warning(error_msg)
 
         return errors
 
     def suggest_corrections(self, code: str) -> Optional[str]:
         """Attempt to suggest corrections for common issues."""
-        self.logger.info("Attempting to suggest corrections")
 
         corrected = code
 
@@ -157,16 +147,10 @@ class PandasQueryValidator:
                     if col.lower() == actual_col.lower():
                         corrected = corrected.replace(f"['{col}']", f"['{actual_col}']")
                         corrected = corrected.replace(f".{col}", f".{actual_col}")
-                        self.logger.info(f"Suggested correction for column name: {col} -> {actual_col}")
 
         # Add null handling for string operations
         if '.str.' in corrected and 'fillna' not in corrected:
             corrected = corrected.replace('.str.', '.fillna("").str.')
-            self.logger.info("Added null handling for string operations")
-
-        # Suggest proper aggregation syntax
-        if any(op in corrected for op in self.valid_aggregations) and 'groupby' not in corrected:
-            self.logger.info("Suggested using groupby before aggregation")
 
         if corrected != code:
             return corrected
@@ -180,7 +164,6 @@ class PandasQueryValidator:
             Tuple[bool, List[str]]: (is_valid, list_of_errors)
         """
         errors = []
-        self.logger.info("Starting pandas query validation")
 
         # Run all checks
         errors.extend(self._check_column_existence(code))
@@ -189,39 +172,34 @@ class PandasQueryValidator:
         errors.extend(self._check_aggregation_usage(code))
 
         is_valid = len(errors) == 0
-        if is_valid:
-            self.logger.info("Query is valid")
-        else:
-            self.logger.info("Query validation failed with errors")
 
         return is_valid, errors
 
 
-def validate_pandas_query(df: pd.DataFrame, code: str, logger: logging.Logger) -> Dict:
-    """
-    Validate a pandas query and suggest corrections if needed.
+    def validate_pandas_query(self, code: str) -> Dict:
+        """
+        Validate a pandas query and suggest corrections if needed.
 
-    Args:
-        df: Input DataFrame
-        code: Pandas query code to validate
+        Args:
+            df: Input DataFrame
+            code: Pandas query code to validate
 
-    Returns:
-        Dictionary containing:
-        - 'code': Original code string
-        - 'is_valid': Boolean indicating if code is valid
-        - 'errors': List of validation errors
-        - 'suggested_correction': Suggested correction string or None
-    """
-    validator = PandasQueryValidator(df, logger)
-    is_valid, errors = validator.validate_query(code)
-    suggested_correction = None
+        Returns:
+            Dictionary containing:
+            - 'code': Original code string
+            - 'is_valid': Boolean indicating if code is valid
+            - 'errors': List of validation errors
+            - 'suggested_correction': Suggested correction string or None
+        """
+        is_valid, errors = self.validate_query(code)
+        suggested_correction = None
 
-    if not is_valid:
-        suggested_correction = validator.suggest_corrections(code)
+        if not is_valid:
+            suggested_correction = self.suggest_corrections(code)
 
-    return {
-        'code': code.strip(),
-        'is_valid': is_valid,
-        'errors': errors,
-        'suggested_correction': suggested_correction
-    }
+        return {
+            'code': code.strip(),
+            'is_valid': is_valid,
+            'errors': errors,
+            'suggested_correction': suggested_correction
+        }

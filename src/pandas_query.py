@@ -6,10 +6,7 @@ import os
 from RestrictedPython import compile_restricted
 from RestrictedPython.Guards import safe_builtins, guarded_iter_unpack_sequence
 from RestrictedPython.Eval import default_guarded_getattr, default_guarded_getitem, default_guarded_getiter
-from .pandas_validator import validate_pandas_query
-import logging
-
-logger = logging.getLogger(__name__)
+from .pandas_validator import PandasQueryValidator
 
 
 class PandasQuery:
@@ -39,46 +36,53 @@ class PandasQuery:
             "_iter_unpack_sequence_": guarded_iter_unpack_sequence,
         }
 
-        # Add safe pandas Series methods
+        # Core pandas Series methods (excluding string accessor methods)
         self.series_methods = [
             "sum", "mean", "any", "argmax", "argmin", "count", "cumsum",
             "diff", "dropna", "fillna", "head", "idxmax", "idxmin",
             "max", "min", "notna", "prod", "quantile", "rename", "round",
             "tail", "to_frame", "to_list", "to_numpy", "unique",
-            "sort_index", "sort_values", "aggregate", "isna", "fillna"
+            "sort_index", "sort_values", "aggregate", "isna", "astype"
         ]
+
+        # Add series methods to restricted globals
         self.restricted_globals.update({
             method: getattr(pd.Series, method) for method in self.series_methods
         })
 
-    def _build_prompt(self, df: pd.DataFrame, query: str) -> str:
-        """
-        Build a detailed prompt for the LLM that includes DataFrame information
-        and guidelines for generating safe, valid code.
-        """
+    def _build_prompt(self, df: pd.DataFrame, query: str, n: int = 5) -> str:
+        """Build a detailed prompt with DataFrame information and query context."""
         # Get detailed column information
         column_info = []
         for col in df.columns:
             dtype = df[col].dtype
             null_count = df[col].isna().sum()
             unique_count = df[col].nunique()
-            sample = str(df[col].iloc[:3].tolist())
+
+            # Get appropriate sample values and range info
+            sample_vals = df[col].sample(min(n, df[col].count()))
+            if pd.api.types.is_numeric_dtype(dtype):
+                try:
+                    range_info = f"Range: {df[col].min()} to {df[col].max()}"
+                except:
+                    range_info = f"Sample values: {list(sample_vals)}"
+            else:
+                range_info = f"Sample values: {list(sample_vals)}"
 
             column_info.append(
                 f"- {col} ({dtype}):\n"
+                f"  * {range_info}\n"
                 f"  * Null values: {null_count}\n"
-                f"  * Unique values: {unique_count}\n"
-                f"  * Sample values: {sample}"
+                f"  * Unique values: {unique_count}"
             )
 
-        column_details = "\n".join(column_info)
-
-        # Build comprehensive prompt
         prompt = f"""Given a pandas DataFrame with {len(df)} rows and the following columns:
 
-{column_details}
+{chr(10).join(column_info)}
 
-Write a single line of Python code that answers this question: {query}
+Write a single line of Python code that answers this question: 
+
+{query}
 
 Guidelines:
 1. Basic Requirements:
@@ -86,47 +90,41 @@ Guidelines:
    - Assign the result to a variable named 'result'
    - Return only the code, no explanations
 
-2. String Operations:
-   - Always handle null values before string operations using fillna('')
-   - Use str.lower() for case-insensitive comparisons
-   - Use str.contains() instead of direct string matching when appropriate
+2. Type-Specific Operations:
+   - For numeric operations on string numbers: Use pd.to_numeric(df['column'], errors='coerce')
+   - For string comparisons: Use .fillna('').str.lower()
+   - For string pattern matching: Use .str.contains() or .str.startswith()
+   - For datetime comparisons: Use .dt accessor
 
-3. Data Type Considerations:
-   - Use appropriate methods for each data type
-   - For dates: Use dt accessor for date components
-   - For numbers: Use appropriate numeric operations
-   - For strings: Use str accessor methods
+3. Null Handling:
+   - Always handle null values before operations
+   - Use fillna() for string operations
+   - Use dropna() or fillna() for numeric operations
 
-4. Null Value Handling:
-   - Always consider null values in your operations
-   - Use fillna() or dropna() as appropriate
-   - For string operations, use fillna('') before the operation
+4. Available Methods:
+   Core methods: {', '.join(self.series_methods)}
+   String operations available via .str accessor
+   DateTime operations available via .dt accessor
 
-5. Available Series Methods:
-   {', '.join(self.series_methods)}
-
-Example valid patterns:
-- result = df[df['text_column'].fillna('').str.lower().str.contains('pattern')]
-- result = df.groupby('column')['value'].mean()
-- result = df[df['number'] > df['number'].mean()]
+Example patterns:
+- String to number comparison: result = df[pd.to_numeric(df['column'], errors='coerce') > 5]
+- Case-insensitive search: result = df[df['column'].fillna('').str.lower().str.contains('pattern')]
+- Section number filtering: result = df[df['section_number'].fillna('').str.startswith('6')]
 """
         return prompt
 
     def _execute_in_sandbox(self, code: str, df: pd.DataFrame) -> Any:
-        """
-        Execute code in RestrictedPython sandbox with comprehensive error handling
-        and safety checks.
-        """
+        """Execute code in RestrictedPython sandbox with validation."""
         try:
             # Pre-execution validation
             if self.validate:
-                validation_result = validate_pandas_query(df, code, logger)
+                validator = PandasQueryValidator(df)
+                validation_result = validator.validate_pandas_query(code)
                 if not validation_result['is_valid']:
-                    logger.warning("Pre-execution validation failed:")
                     for error in validation_result['errors']:
-                        logger.warning(f"- {error}")
+                        print(f"Warning: {error}")
                     if validation_result['suggested_correction']:
-                        logger.info("Using suggested correction")
+                        print("Using suggested correction")
                         code = validation_result['suggested_correction']
 
             # Compile the code in restricted mode
@@ -136,43 +134,28 @@ Example valid patterns:
                 mode='exec'
             )
 
-            # Create local namespace with just the dataframe
-            local_vars = {'df': df, 'result': None}
+            # Create local namespace with DataFrame and numeric conversion function
+            local_vars = {
+                'df': df,
+                'result': None,
+                'pd': pd
+            }
 
             # Execute in sandbox
             exec(byte_code, self.restricted_globals, local_vars)
 
-            # Post-execution type checking
             result = local_vars['result']
             if result is None:
                 raise ValueError("Execution produced no result")
-
-            # Log successful execution
-            logger.info(f"Successfully executed code: {code}")
-            logger.info(f"Result type: {type(result)}")
 
             return result
 
         except Exception as e:
             error_msg = f"Sandbox execution failed. Code: {code}. Error: {str(e)}"
-            logger.error(error_msg)
             raise RuntimeError(error_msg)
 
     def execute(self, df: pd.DataFrame, query: str) -> Any:
-        """
-        Execute a natural language query on a pandas DataFrame using sandbox protection
-        and validation.
-
-        Args:
-            df: The pandas DataFrame to query
-            query: Natural language query string
-
-        Returns:
-            Query result (could be DataFrame, Series, scalar, etc.)
-        """
-        logger.info(f"Executing query: {query}")
-
-        # Get code from LLM
+        """Execute a natural language query with validation."""
         response = self.client.chat.completions.create(
             model=self.model,
             temperature=self.temperature,
@@ -190,9 +173,7 @@ Example valid patterns:
             code = code.split("\n", 1)[1]
         code = code.strip("` \n")
 
-        # Store for reference
         self.last_code = code
-        logger.info(f"Generated code: {code}")
 
         # Execute in sandbox
         return self._execute_in_sandbox(code, df)
