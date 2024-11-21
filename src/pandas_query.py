@@ -1,7 +1,8 @@
+# src/pandas_query.py
 from openai import OpenAI
 import pandas as pd
 import numpy as np
-from typing import Any, Optional, Dict
+from typing import Any, Optional
 import os
 from RestrictedPython import compile_restricted
 from RestrictedPython.Guards import safe_builtins, guarded_iter_unpack_sequence
@@ -11,7 +12,7 @@ from RestrictedPython.Eval import default_guarded_getattr, default_guarded_getit
 class PandasQuery:
     """
     A streamlined class for executing natural language queries on pandas DataFrames using OpenAI's LLM,
-    with sandbox protection.
+    with sandbox protection and NaN handling.
     """
 
     def __init__(
@@ -42,7 +43,7 @@ class PandasQuery:
             "diff", "dropna", "fillna", "head", "idxmax", "idxmin",
             "max", "min", "notna", "prod", "quantile", "rename", "round",
             "tail", "to_frame", "to_list", "to_numpy", "unique",
-            "sort_index", "sort_values", "aggregate"
+            "sort_index", "sort_values", "aggregate", "isna", "fillna"
         ]
         self.restricted_globals.update({
             method: getattr(pd.Series, method) for method in series_methods
@@ -58,9 +59,16 @@ Write a single line of Python code that answers this question: {query}
 
 Guidelines:
 - Use only pandas and numpy operations
-- String comparisons should be case-insensitive
+- Always handle NaN/null values in string operations using fillna('')
+- For string operations, first handle NaN values, then do the comparison
+- For case-insensitive string comparisons, use .str.lower()
 - Assign the result to a variable named 'result'
 - Return only the code, no explanations
+
+Example of correct string operations with NaN handling:
+- Wrong: df['col'].str.startswith('prefix')  # will fail on NaN
+- Right: df['col'].fillna('').str.startswith('prefix')  # handles NaN
+- Right: df['col'].fillna('').str.lower().str.startswith('prefix')  # case-insensitive
 """
 
     def _execute_in_sandbox(self, code: str, df: pd.DataFrame) -> Any:
