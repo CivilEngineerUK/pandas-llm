@@ -195,20 +195,63 @@ class PandasQuery:
                 })
 
         prompt = f"""Given a pandas DataFrame with the following structure:
-```
-{df_info}
-```
+    ```
+    {df_info}
+    ```
 
-Write a single line of Python code that answers this question: {query}
+    Write a single line of Python code that answers this question: {query}
 
-Requirements:
-1. Assign result to 'result' variable
-2. Handle null values appropriately
-3. Use type-safe operations (pd.to_numeric for string numbers)
-4. Use proper string operations (.str) and datetime (.dt) accessors
-5. Return only the code, no explanations
+    Requirements:
+    1. Assign result to 'result' variable
+    2. Handle null values appropriately:
+       - For string operations: Use .fillna('') before .str operations
+       - For numeric operations: Use .fillna(0) or .dropna() as appropriate
+       - For boolean operations: Use .fillna(False)
 
-Available methods: {', '.join(self.restricted_globals.keys())}"""
+    3. String Operations Guidelines:
+       - Use .str accessor for string operations
+       - For case-insensitive matching: Use .str.lower()
+       - For counting: Use .str.count(pattern)
+       - For starts/ends with: Use .str.startswith() or .str.endswith()
+       - For contains: Use .str.contains(pattern, case=True/False)
+       - Always handle null values before string operations
+
+    4. Numeric Operations Guidelines:
+       - For string-to-numeric conversion: Use pd.to_numeric(df['column'], errors='coerce')
+       - For aggregations (sum, mean, etc.), only use with groupby
+       - For comparisons, use standard operators (>, <, >=, <=, ==, !=)
+
+    5. Date Operations Guidelines:
+       - Use .dt accessor for datetime operations
+       - Common attributes: .dt.year, .dt.month, .dt.day
+       - For date comparisons, use standard operators
+
+    6. Filtering Guidelines:
+       - Use boolean indexing: df[condition]
+       - For multiple conditions, use & (and) and | (or) with parentheses
+       - Example: df[(condition1) & (condition2)]
+
+    7. Return Guidelines:
+       - Return only the matching rows unless aggregation is specifically requested
+       - Do not include explanatory comments in the code
+       - Keep to a single line of code
+
+    Available String Operations:
+    - Basic: contains, startswith, endswith, lower, upper, strip
+    - Count/Match: count, match, extract, find, findall
+    - Transform: replace, pad, center, slice, split
+
+    Available Numeric Operations:
+    - Comparisons: >, <, >=, <=, ==, !=
+    - Aggregations (with groupby only): sum, mean, median, min, max, count
+
+    Example Patterns:
+    - String search: df[df['column'].fillna('').str.contains('pattern')]
+    - Multiple conditions: df[(df['col1'] > 0) & (df['col2'].str.startswith('prefix'))]
+    - Numeric filtering: df[pd.to_numeric(df['column'], errors='coerce') > value]
+    - Case-insensitive: df[df['column'].fillna('').str.lower().str.contains('pattern')]
+
+    Return only the code, no explanations."""
 
         return prompt
 

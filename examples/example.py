@@ -1,3 +1,4 @@
+import json
 import pandas as pd
 from src.pandas_query import PandasQuery
 
@@ -5,16 +6,15 @@ from src.pandas_query import PandasQuery
 df = pd.read_csv("customers-100.csv")
 
 # Create query executor
-querier = PandasQuery(validate=True)
+querier = PandasQuery(validate=True, temperature=0.2)
 
 # Execute query
 try:
-    result = querier.execute(df, "Get a table of all customers who have a first name beginning with 'D'?")
+    result = querier.execute(df, "Get a table of all customers who have a first name beginning with 'D' and who live in a city with exactly two e's in it?")
 
     # Get complete results as a dictionary
-    result_dict = result.model_dump()  # Pydantic v2 syntax (or use .dict() for v1)
+    result_dict = result.model_dump()
     print("\nComplete results:")
-    import json
     print(json.dumps(result_dict, indent=2))
 
     # df of results

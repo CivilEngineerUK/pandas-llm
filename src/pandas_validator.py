@@ -15,7 +15,11 @@ class PandasQueryValidator:
         # Valid pandas operations by data type - simplified to most common operations
         self.valid_operations = {
             'object': {
-                'string_ops': {'contains', 'startswith', 'endswith'},
+                'string_ops': {
+                    'contains', 'startswith', 'endswith', 'count',  # Added count explicitly
+                    'lower', 'upper', 'strip', 'len', 'slice', 'extract',
+                    'find', 'findall', 'replace', 'pad', 'center', 'split'
+                },
                 'comparisons': {'==', '!=', 'isin'}
             },
             'number': {
@@ -32,41 +36,41 @@ class PandasQueryValidator:
         }
 
         # Common pandas aggregation functions that require groupby
+        # Removed 'count' from here since it's also a string operation
         self.group_required_aggs = {
-            'sum', 'mean', 'median', 'min', 'max', 'count'
+            'sum', 'mean', 'median', 'min', 'max'
         }
 
-    def _extract_column_references(self, code: str) -> set[str]:
-        """Extract column references from the code."""
-        import re
-        # Match patterns like df['column'] or df.column
-        pattern = r"df[\['](\w+)[\]']|df\.(\w+)"
-        matches = re.findall(pattern, code)
-        # Flatten and filter matches
-        return {match[0] or match[1] for match in matches}
 
-    def _extract_operations(self, code: str) -> list[str]:
-        """Extract pandas operations from the code."""
-        import re
-        # Match method calls on df or column references
-        pattern = r'\.(\w+)\('
-        return re.findall(pattern, code)
 
-    def _check_column_existence(self, code: str) -> list[str]:
-        """Check if all referenced columns exist in the DataFrame."""
+    def _extract_operations(self, code: str) -> Dict[str, List[str]]:
+        """Extract pandas operations from the code, categorizing them by type."""
+        import re
+
+        # Match string operations specifically
+        str_pattern = r'\.str\.(\w+)'
+        str_ops = re.findall(str_pattern, code)
+
+        # Match other operations, excluding string operations
+        other_pattern = r'(?<!\.str)\.(\w+)\('
+        other_ops = re.findall(other_pattern, code)
+
+        return {
+            'string_ops': str_ops,
+            'other_ops': other_ops
+        }
+
+    def _check_aggregation_usage(self, code: str) -> list[str]:
+        """Check for valid aggregation function usage."""
         errors = []
-        referenced_columns = self._extract_column_references(code)
+        operations = self._extract_operations(code)
 
-        for col in referenced_columns:
-            if col not in self.columns:
-                similar_cols = [
-                    existing_col for existing_col in self.columns
-                    if existing_col.lower() == col.lower()
-                ]
-                error_msg = f"Column '{col}' does not exist in DataFrame"
-                if similar_cols:
-                    error_msg += f". Did you mean '{similar_cols[0]}'?"
-                errors.append(error_msg)
+        # Check only non-string operations for aggregation requirements
+        for op in operations['other_ops']:
+            if op in self.group_required_aggs:  # count is no longer here
+                if 'groupby' not in code:
+                    error_msg = f"Aggregation '{op}' used without groupby"
+                    errors.append(error_msg)
 
         return errors
 
@@ -88,35 +92,63 @@ class PandasQueryValidator:
                 else 'object'
             )
 
+            # Check string operations
+            if operations['string_ops']:
+                if dtype_category != 'object':
+                    errors.append(
+                        f"String operations used on non-string column '{col}' "
+                        f"of type {dtype}"
+                    )
+                else:
+                    for op in operations['string_ops']:
+                        if op not in self.valid_operations['object']['string_ops']:
+                            errors.append(
+                                f"String operation '{op}' may not be valid for "
+                                f"column '{col}'"
+                            )
+
+            # Check other operations
             if dtype_category in self.valid_operations:
                 valid_ops = set().union(
                     *self.valid_operations[dtype_category].values()
                 )
-
-                for op in operations:
+                for op in operations['other_ops']:
                     if op not in valid_ops and op not in self.group_required_aggs:
-                        error_msg = (
+                        errors.append(
                             f"Operation '{op}' may not be compatible with "
                             f"column '{col}' of type {dtype}"
                         )
-                        errors.append(error_msg)
 
         return errors
 
-    def _check_aggregation_usage(self, code: str) -> list[str]:
-        """Check for valid aggregation function usage."""
+    def _extract_column_references(self, code: str) -> set[str]:
+        """Extract column references from the code."""
+        import re
+        # Match patterns like df['column'] or df.column
+        pattern = r"df[\['](\w+)[\]']|df\.(\w+)"
+        matches = re.findall(pattern, code)
+        # Flatten and filter matches
+        return {match[0] or match[1] for match in matches}
+
+
+    def _check_column_existence(self, code: str) -> list[str]:
+        """Check if all referenced columns exist in the DataFrame."""
         errors = []
-        operations = self._extract_operations(code)
+        referenced_columns = self._extract_column_references(code)
 
-        for op in operations:
-            if op in self.group_required_aggs:
-                if 'groupby' not in code and not any(
-                        c in code for c in ['sum()', 'mean()', 'count()']
-                ):
-                    error_msg = f"Aggregation '{op}' used without groupby"
-                    errors.append(error_msg)
+        for col in referenced_columns:
+            if col not in self.columns:
+                similar_cols = [
+                    existing_col for existing_col in self.columns
+                    if existing_col.lower() == col.lower()
+                ]
+                error_msg = f"Column '{col}' does not exist in DataFrame"
+                if similar_cols:
+                    error_msg += f". Did you mean '{similar_cols[0]}'?"
+                errors.append(error_msg)
 
         return errors
+
 
     def suggest_corrections(self, code: str) -> Optional[str]:
         """Attempt to suggest corrections for common issues."""
