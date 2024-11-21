@@ -1,17 +1,84 @@
-from openai import OpenAI
+
 import pandas as pd
 import numpy as np
-from typing import Any, Optional, Dict
-import os
 from RestrictedPython import compile_restricted
 from RestrictedPython.Guards import safe_builtins, guarded_iter_unpack_sequence
 from RestrictedPython.Eval import default_guarded_getattr, default_guarded_getitem, default_guarded_getiter
+from openai import OpenAI
+import os
+from typing import Dict, Any, Optional, Union, List
+from pydantic import BaseModel, Field, validator
 from .pandas_validator import PandasQueryValidator
 
 
-class PandasQuery:
-    """A streamlined class for executing natural language queries on pandas DataFrames using OpenAI's LLM."""
+class QueryResult(BaseModel):
+    """Pydantic model for query execution results."""
+    query: str = Field(..., description="Original query string")
+    code: str = Field(..., description="Generated pandas code")
+    is_valid: bool = Field(..., description="Whether the query is valid")
+    errors: List[str] = Field(default_factory=list, description="List of validation/execution errors")
+    result: Optional[Any] = Field(None, description="Query execution result")
 
+    class Config:
+        arbitrary_types_allowed = True
+        json_encoders = {
+            pd.DataFrame: lambda df: df.to_dict(orient='records'),
+            pd.Series: lambda s: s.to_dict(),
+            np.ndarray: lambda arr: arr.tolist(),
+            np.int64: lambda x: int(x),
+            np.float64: lambda x: float(x)
+        }
+
+    def _serialize_value(self, v: Any) -> Any:
+        """Helper method to serialize values."""
+        if isinstance(v, pd.DataFrame):
+            return v.to_dict(orient='records')
+        elif isinstance(v, pd.Series):
+            return v.to_dict()
+        elif isinstance(v, np.ndarray):
+            return v.tolist()
+        elif isinstance(v, (np.int64, np.float64)):
+            return float(v)
+        elif isinstance(v, dict):
+            return {k: self._serialize_value(v) for k, v in v.items()}
+        elif isinstance(v, list):
+            return [self._serialize_value(item) for item in v]
+        return v
+
+    def model_dump(self, **kwargs) -> Dict[str, Any]:
+        """Override model_dump to ensure all values are serializable."""
+        data = {
+            'query': self.query,
+            'code': self.code,
+            'is_valid': self.is_valid,
+            'errors': self.errors,
+            'result': self._serialize_value(self.result),
+        }
+        return data
+
+    def get_results(self) -> Dict[str, Any]:
+        """Get a simplified dictionary of just the key results."""
+        return {
+            'valid': self.is_valid,
+            'result': self._serialize_value(self.result) if self.is_valid else None,
+            'errors': self.errors if not self.is_valid else [],
+        }
+
+    @validator('result', pre=True)
+    def validate_result(cls, v):
+        """Convert pandas/numpy results to native Python types."""
+        if isinstance(v, pd.DataFrame):
+            return v.to_dict(orient='records')
+        elif isinstance(v, pd.Series):
+            return v.to_dict()
+        elif isinstance(v, np.ndarray):
+            return v.tolist()
+        elif isinstance(v, (np.int64, np.float64)):
+            return float(v)
+        return v
+
+
+class PandasQuery:
     def __init__(
             self,
             model: str = "gpt-4",
@@ -22,11 +89,71 @@ class PandasQuery:
         self.client = OpenAI(api_key=api_key or os.getenv("OPENAI_API_KEY"))
         self.model = model
         self.temperature = temperature
-        self.last_code = None
         self.validate = validate
+        self.restricted_globals = self._setup_restricted_globals()
 
-        # Set up sandbox environment
-        self.restricted_globals = {
+    def execute(self, df: pd.DataFrame, query: str) -> QueryResult:
+        """Execute a natural language query with validation and return comprehensive results."""
+        import time
+
+        # Initialize result with Pydantic model
+        query_result = QueryResult(
+            query=query,
+            code="",
+            is_valid=False,
+            errors=[],
+            result=None,
+        )
+
+        try:
+            # Get code from LLM
+            response = self.client.chat.completions.create(
+                model=self.model,
+                temperature=self.temperature,
+                messages=[
+                    {"role": "user", "content": self._build_prompt(df, query)}
+                ]
+            )
+
+            code = response.choices[0].message.content.strip()
+            code = self._clean_code(code)
+            query_result.code = code
+
+            # Validate if required
+            if self.validate:
+                validator = PandasQueryValidator(df)
+                validation_result = validator.get_validation_result(code)
+
+                if not validation_result['is_valid']:
+                    query_result.errors = validation_result['errors']
+                    return query_result
+
+                # Use suggested correction if available
+                if validation_result['suggested_correction']:
+                    code = validation_result['suggested_correction']
+                    query_result.code = code
+
+            # Execute if valid
+            result = self._execute_in_sandbox(code, df)
+
+            query_result.is_valid = True
+            query_result.result = result
+
+        except Exception as e:
+            query_result.errors.append(f"Execution error: {str(e)}")
+
+        return query_result
+
+    def _setup_restricted_globals(self) -> Dict:
+        """Set up restricted globals for sandbox execution."""
+        # Core pandas Series methods
+        series_methods = [
+            "sum", "mean", "any", "argmax", "argmin", "count",
+            "diff", "dropna", "fillna", "head", "max", "min",
+            "sort_values", "unique", "isna", "astype"
+        ]
+
+        restricted_globals = {
             "__builtins__": dict(safe_builtins),
             "pd": pd,
             "np": np,
@@ -36,144 +163,86 @@ class PandasQuery:
             "_iter_unpack_sequence_": guarded_iter_unpack_sequence,
         }
 
-        # Core pandas Series methods (excluding string accessor methods)
-        self.series_methods = [
-            "sum", "mean", "any", "argmax", "argmin", "count", "cumsum",
-            "diff", "dropna", "fillna", "head", "idxmax", "idxmin",
-            "max", "min", "notna", "prod", "quantile", "rename", "round",
-            "tail", "to_frame", "to_list", "to_numpy", "unique",
-            "sort_index", "sort_values", "aggregate", "isna", "astype"
-        ]
-
-        # Add series methods to restricted globals
-        self.restricted_globals.update({
-            method: getattr(pd.Series, method) for method in self.series_methods
+        # Add series methods
+        restricted_globals.update({
+            method: getattr(pd.Series, method) for method in series_methods
         })
 
-    def _build_prompt(self, df: pd.DataFrame, query: str, n: int = 5) -> str:
+        return restricted_globals
+
+    def _build_prompt(self, df: pd.DataFrame, query: str) -> str:
         """Build a detailed prompt with DataFrame information and query context."""
-        # Get detailed column information
-        column_info = []
+        # Convert DataFrame info to dictionary for better LLM interpretation
+        df_info = {
+            "metadata": {
+                "rows": len(df),
+                "columns": len(df.columns)
+            },
+            "columns": {}
+        }
+
         for col in df.columns:
-            dtype = df[col].dtype
-            null_count = df[col].isna().sum()
-            unique_count = df[col].nunique()
+            df_info["columns"][col] = {
+                "dtype": str(df[col].dtype),
+                "null_count": int(df[col].isna().sum()),
+                "unique_count": int(df[col].nunique()),
+                "sample_values": df[col].dropna().sample(min(3, len(df))).tolist()
+            }
+            if pd.api.types.is_numeric_dtype(df[col].dtype):
+                df_info["columns"][col].update({
+                    "min": float(df[col].min()) if not pd.isna(df[col].min()) else None,
+                    "max": float(df[col].max()) if not pd.isna(df[col].max()) else None
+                })
 
-            # Get appropriate sample values and range info
-            sample_vals = df[col].sample(min(n, df[col].count()))
-            if pd.api.types.is_numeric_dtype(dtype):
-                try:
-                    range_info = f"Range: {df[col].min()} to {df[col].max()}"
-                except:
-                    range_info = f"Sample values: {list(sample_vals)}"
-            else:
-                range_info = f"Sample values: {list(sample_vals)}"
+        prompt = f"""Given a pandas DataFrame with the following structure:
+```
+{df_info}
+```
 
-            column_info.append(
-                f"- {col} ({dtype}):\n"
-                f"  * {range_info}\n"
-                f"  * Null values: {null_count}\n"
-                f"  * Unique values: {unique_count}"
-            )
+Write a single line of Python code that answers this question: {query}
 
-        prompt = f"""Given a pandas DataFrame with {len(df)} rows and the following columns:
+Requirements:
+1. Assign result to 'result' variable
+2. Handle null values appropriately
+3. Use type-safe operations (pd.to_numeric for string numbers)
+4. Use proper string operations (.str) and datetime (.dt) accessors
+5. Return only the code, no explanations
 
-{chr(10).join(column_info)}
+Available methods: {', '.join(self.restricted_globals.keys())}"""
 
-Write a single line of Python code that answers this question: 
-
-{query}
-
-Guidelines:
-1. Basic Requirements:
-   - Use only pandas and numpy operations
-   - Assign the result to a variable named 'result'
-   - Return only the code, no explanations
-
-2. Type-Specific Operations:
-   - For numeric operations on string numbers: Use pd.to_numeric(df['column'], errors='coerce')
-   - For string comparisons: Use .fillna('').str.lower()
-   - For string pattern matching: Use .str.contains() or .str.startswith()
-   - For datetime comparisons: Use .dt accessor
-
-3. Null Handling:
-   - Always handle null values before operations
-   - Use fillna() for string operations
-   - Use dropna() or fillna() for numeric operations
-
-4. Available Methods:
-   Core methods: {', '.join(self.series_methods)}
-   String operations available via .str accessor
-   DateTime operations available via .dt accessor
-
-Example patterns:
-- String to number comparison: result = df[pd.to_numeric(df['column'], errors='coerce') > 5]
-- Case-insensitive search: result = df[df['column'].fillna('').str.lower().str.contains('pattern')]
-- Section number filtering: result = df[df['section_number'].fillna('').str.startswith('6')]
-"""
         return prompt
 
-    def _execute_in_sandbox(self, code: str, df: pd.DataFrame) -> Any:
-        """Execute code in RestrictedPython sandbox with validation."""
-        try:
-            # Pre-execution validation
-            if self.validate:
-                validator = PandasQueryValidator(df)
-                validation_result = validator.validate_pandas_query(code)
-                if not validation_result['is_valid']:
-                    for error in validation_result['errors']:
-                        print(f"Warning: {error}")
-                    if validation_result['suggested_correction']:
-                        print("Using suggested correction")
-                        code = validation_result['suggested_correction']
 
-            # Compile the code in restricted mode
-            byte_code = compile_restricted(
-                source=code,
-                filename='<inline>',
-                mode='exec'
-            )
 
-            # Create local namespace with DataFrame and numeric conversion function
-            local_vars = {
-                'df': df,
-                'result': None,
-                'pd': pd
-            }
-
-            # Execute in sandbox
-            exec(byte_code, self.restricted_globals, local_vars)
-
-            result = local_vars['result']
-            if result is None:
-                raise ValueError("Execution produced no result")
-
-            return result
-
-        except Exception as e:
-            error_msg = f"Sandbox execution failed. Code: {code}. Error: {str(e)}"
-            raise RuntimeError(error_msg)
-
-    def execute(self, df: pd.DataFrame, query: str) -> Any:
-        """Execute a natural language query with validation."""
-        response = self.client.chat.completions.create(
-            model=self.model,
-            temperature=self.temperature,
-            messages=[
-                {"role": "user", "content": self._build_prompt(df, query)}
-            ]
-        )
-
-        code = response.choices[0].message.content.strip()
-
-        # Clean up code
+    @staticmethod
+    def _clean_code(code: str) -> str:
+        """Clean up code from LLM response."""
         if code.startswith("```"):
             code = code.split("\n", 1)[1].rsplit("\n", 1)[0]
         if code.startswith("python"):
             code = code.split("\n", 1)[1]
-        code = code.strip("` \n")
+        return code.strip("` \n")
 
-        self.last_code = code
+    def _execute_in_sandbox(self, code: str, df: pd.DataFrame) -> Any:
+        """Execute code in RestrictedPython sandbox."""
+        byte_code = compile_restricted(
+            source=code,
+            filename='<inline>',
+            mode='exec'
+        )
 
-        # Execute in sandbox
-        return self._execute_in_sandbox(code, df)
+        local_vars = {'df': df, 'result': None, 'pd': pd}
+        exec(byte_code, self.restricted_globals, local_vars)
+
+        if local_vars['result'] is None:
+            raise ValueError("Execution produced no result")
+
+        return local_vars['result']
+
+    @staticmethod
+    def _extract_column_references(code: str) -> set[str]:
+        """Extract column references from code."""
+        import re
+        pattern = r"df[\['](\w+)[\]']|df\.(\w+)"
+        matches = re.findall(pattern, code)
+        return {match[0] or match[1] for match in matches}

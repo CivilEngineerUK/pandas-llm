@@ -1,32 +1,26 @@
-# examples/example.py
-import os
 import pandas as pd
-import sys
-from pathlib import Path
-
-# Add the project root to the Python path
-project_root = Path(__file__).resolve().parent.parent
-sys.path.append(str(project_root))
-
 from src.pandas_query import PandasQuery
 
-# Data
-data = [
-    ('John Doe', 25, 50),
-    ('Jane Smith', 38, 70),
-    ('Alex Johnson', 45, 80),
-    ('Jessica Brown', 60, 40),
-    ('Michael Davis', 22, 90),
-]
-df = pd.DataFrame(data, columns=['name', 'age', 'donation'])
+# Create sample DataFrame
+df = pd.read_csv("customers-100.csv")
 
 # Create query executor
-querier = PandasQuery()
+querier = PandasQuery(validate=True)
 
 # Execute query
-query = "What is the average donation of people older than 40 who donated more than $50?"
-result = querier.execute(df, query)
+try:
+    result = querier.execute(df, "Get a table of all customers who have a first name beginning with 'D'?")
 
-print(f"Query: {query}")
-print(f"Generated code: {querier.last_code}")
-print(f"Result: {result}")
+    # Get complete results as a dictionary
+    result_dict = result.model_dump()  # Pydantic v2 syntax (or use .dict() for v1)
+    print("\nComplete results:")
+    import json
+    print(json.dumps(result_dict, indent=2))
+
+    # df of results
+    print('\nHere is a table of the output results:\n')
+    df_result = pd.DataFrame(result.result)
+    print(df_result)
+
+except Exception as e:
+    print(f"Error executing query: {str(e)}")
