@@ -1,4 +1,4 @@
-
+# src/pandas_query.py
 import pandas as pd
 import numpy as np
 from RestrictedPython import compile_restricted
@@ -6,7 +6,7 @@ from RestrictedPython.Guards import safe_builtins, guarded_iter_unpack_sequence
 from RestrictedPython.Eval import default_guarded_getattr, default_guarded_getitem, default_guarded_getiter
 from openai import OpenAI
 import os
-from typing import Dict, Any, Optional, Union, List
+from typing import Dict, Any, Optional, List
 from pydantic import BaseModel, Field, validator
 from .pandas_validator import PandasQueryValidator
 
