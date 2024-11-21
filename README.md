@@ -1,22 +1,20 @@
 # pandas-LLM
 
 ## Introduction
-pandas-llm is a lightweight Python library that extends pandas to allow querying datasets using OpenAI prompts. This powerful tool leverages the natural language processing capabilities of OpenAI to offer intuitive, language-based querying of your Pandas dataframes.
+pandas-llm is a lightweight Python library that extends pandas to allow querying datasets using OpenAI prompts. This powerful tool leverages the natural language processing capabilities of OpenAI to offer intuitive, language-based querying of your Pandas dataframes with built-in validation and safety features.
 
 ## Key Features
-- **Natural Language Querying**: With pandas-llm, you can execute complex Pandas queries using natural language prompts. Instead of writing code, you can express your query in plain language and obtain the desired results.
+- **Natural Language Querying**: Execute complex Pandas queries using natural language prompts. Instead of writing code, express your query in plain language and obtain the desired results.
 
-- **Data Privacy**: Your data is not sent on the Internet. Pandas-LLM works locally with your data and uses openAI to create the query based on the dataframe columns and data types, not its content.
+- **Data Privacy**: Your data stays local. Pandas-LLM works with your data locally and uses OpenAI to create queries based on dataframe metadata (columns and data types), not its content.
 
-- **Seamless Integration**: The library seamlessly integrates with your existing Pandas workflow. You can continue using normal Pandas functions and syntax while leveraging the added capability of natural language queries.
+- **Query Validation**: Built-in validation ensures generated queries are safe and compatible with your data types, preventing common errors and ensuring reliable results.
 
-- **Efficiency and Performance**: pandas-LLM is designed to deliver efficient and performant querying capabilities. It uses OpenAI's language model to process queries quickly and accurately, providing rapid insights from your data.
+- **Safe Execution**: Uses RestrictedPython for sandboxed execution of generated queries, providing an additional layer of security.
 
-- **Flexible and Expressive**: Whether you need to filter, aggregate, sort, or transform your data, pandas-LLM allows you to express your requirements flexibly and expressively. You can perform complex operations on your dataframes with ease using human-readable language.
+- **Serializable Results**: Results are automatically converted to JSON-serializable formats, making it easy to store or transmit query results.
 
-- **Intelligent Results**: The library returns the results of your queries in a concise and understandable format. You can extract valuable insights from your data without complex code or manual analysis.
-
-With pandas-llm, you can unlock the power of natural language querying and effortlessly execute complex pandas queries. Let the library handle the intricacies of data manipulation while you focus on gaining insights and making data-driven decisions.
+- **Type-Safe Operations**: Intelligent handling of different data types including strings, numbers, dates, and boolean values with appropriate null value handling.
 
 ## Installation
 
@@ -26,74 +24,87 @@ Install pandas-llm using pip:
 pip install pandas-llm
 ```
 
-## Features
-- Query pandas dataframes using natural language prompts.
-- Leverage the power of OpenAI's language models in your data analysis.
-- Seamless integration with existing pandas functions.
-
 ## Usage
-Here's a quick [example](https://github.com/DashyDashOrg/pandas-llm/blob/main/pandas_llm/example.py) of how to use pandas-llm:
+Here's a basic example of how to use pandas-llm:
 
 ```python
-import os
+import json
 import pandas as pd
-from src import PandasLLM
+from src.pandas_query import PandasQuery
 
-# Data
-# Please note that these names, ages, and donations are randomly generated 
-# and do not correspond to real individuals or their donations.
-data = [('John Doe', 25, 50),
-        ('Jane Smith', 38, 70),
-        ('Alex Johnson', 45, 80),
-        ('Jessica Brown', 60, 40),
-        ('Michael Davis', 22, 90),
-        ('Emily Wilson', 30, 60),
-        ('Daniel Taylor', 35, 75),
-        ('Sophia Moore', 40, 85),
-        ('David Thomas', 50, 65),
-        ('Olivia Jackson', 29, 55)]
-df = pd.DataFrame(data, columns=['name', 'age', 'donation'])
+# Create sample DataFrame
+df = pd.read_csv("customers-100.csv")
 
-conv_df = PandasLLM(data=df, llm_api_key=os.environ.get("OPENAI_API_KEY"))
-result = conv_df.prompt("What is the average donation of people older than 40 who donated more than $50?")
-code = conv_df.code_block
+# Create query executor
+querier = PandasQuery(validate=True, temperature=0)
 
-print(f"Executing the following expression of type {type(result)}:\n{code}\n\nResult is:\n {result}\n")
-# Executing the following expression of type <class 'numpy.float64'>:
-# result = df.loc[(df['age'] > 40) & (df['donation'] > 50), 'donation'].mean()
+# Execute query
+try:
+    # query = "Get a table of all customers who have a first name beginning with 'D' and who live in a city with exactly two e's in it?"
+    # query = "Get a subtable of people who live in Panama"
+    query = "Get a subtable of people whos surname backwards is: 'nosdodn' or 'atam'"
+    result = querier.execute(df, query)
 
-# Result is:
-#  72.5
+    # Get complete results as a dictionary
+    result_dict = result.model_dump()
+    print("\nComplete results:")
+    print(json.dumps(result_dict, indent=2))
 
+    # df of results
+    print('\nHere is a table of the output results:\n')
+    df_result = pd.DataFrame(result.result)
+    print(df_result)
+
+except Exception as e:
+    print(f"Error executing query: {str(e)}")
 ```
 
-There is also a chatbot available in the repository using the same dataset. 
-Look at [Chatbot example](https://github.com/DashyDashOrg/pandas-llm/blob/main/pandas_llm/example-chatbot.py)
+## Query Result Structure
+The library returns a QueryResult object with the following attributes:
 
-## PandasLLM Class Constructor
+```python
+{
+    "query": str,          # Original natural language query
+    "code": str,          # Generated pandas code
+    "is_valid": bool,     # Whether the query passed validation
+    "errors": List[str],  # Any validation or execution errors
+    "result": Any         # Query results (automatically serialized)
+}
+```
 
-The constructor for the PandasLLM class has been enhanced in this release to provide more flexibility and control over the language model interaction. The constructor accepts the following arguments:
+## Supported Operations
+The library supports a wide range of pandas operations:
 
-**data** (mandatory): The data to be used. It can be a Pandas DataFrame, a list of lists, tuples, dictionaries, a dictionary, a string, or a list.
+### String Operations
+- Basic: contains, startswith, endswith, lower, upper, strip
+- Count/Match: count, match, extract, find, findall
+- Transform: replace, pad, center, slice, split
 
-**llm_engine** (optional): The name of the LLM engine to use. Currently, only OpenAI is supported. Defaults to "openai".
+### Numeric Operations
+- Comparisons: >, <, >=, <=, ==, !=
+- Aggregations (with groupby): sum, mean, median, min, max, count
 
-**llm_params** (optional): A dictionary of parameters to be used with the OpenAI API. This allows customization of the LLM behavior. Defaults to model=gpt-3.5-turbo and temperature=0.2.
+### Date Operations
+- Attributes: year, month, day
+- Comparisons: >, <, >=, <=, ==, !=
 
-**prompt_override** (optional): A boolean that determines whether or not the prompt is overridden. If set to True, the custom prompt becomes the main prompt. Defaults to False.
+### Advanced Features
+- Automatic null handling appropriate to data type
+- Type-safe operations with proper conversions
+- Multi-condition filtering with proper parentheses
+- Case-sensitive and case-insensitive string operations
 
-**custom_prompt** (optional): A string that can be provided if prompt_override is False. The custom prompt will be added to the default pandas_llm prompt. Defaults to an empty string.
+## Configuration
+The PandasQuery constructor accepts the following parameters:
 
-**path** (optional): The path to the file where the debug data will be saved. If not specified, debug data files will not be generated.
-
-**verbose** (optional): A boolean determines whether debugging information will be printed. If set to True, additional debugging info will be displayed. Defaults to False.
-
-**data_privacy** (optional): A boolean determines whether the data is treated as private. If set to True, the function will not send the data content to OpenAI. Defaults to True.
-
-**llm_api_key** (optional): The OpenAI API key to be used. The library will attempt to use the default API key configured if not provided.
-
-**force_sandbox** (optional): A boolean determining the fallback behaviour if the sandbox environment fails. If set to False and the sandbox fails, the library will retry using eval, which is less safe. Defaults to False.
-
+```python
+PandasQuery(
+    model: str = "gpt-4",              # OpenAI model to use
+    temperature: float = 0.2,          # Temperature for query generation
+    api_key: Optional[str] = None,     # OpenAI API key
+    validate: bool = True              # Enable/disable query validation
+)
+```
 
 ## Contributing
 Pull requests are welcome. For major changes, please open an issue first to discuss what you would like to change. Please make sure to update tests as appropriate.
