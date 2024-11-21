@@ -5,7 +5,7 @@ import sys
 from pathlib import Path
 sys.path.append(str(Path(__file__).resolve().parent.parent))
 
-from pandas_llm import PandasLLM
+from src import PandasLLM
 
 # Data
 #  Please note that these names, ages, and donations are randomly generated and do not correspond to real individuals or their donations.
